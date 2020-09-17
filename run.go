@@ -299,7 +299,7 @@ func run(args []string) error {
 			})
 			discoverDHCP := &discovery.DHCP{OnError: func(err error) { log.Errorf("dhcp: %v", err) }}
 			discoverDNS := &discovery.DNS{Upstream: c.DiscoveryDNS}
-			discoveryResolver := discovery.Resolver{discoverMDNS, discoverDHCP}
+			discoveryResolver := discovery.Resolver{discoverDHCP, discoverMDNS}
 			if c.DiscoveryDNS != "" {
 				// Only include discovery DNS as discovery resolver if
 				// explicitly specified as auto-discovered DNS discovery can
@@ -307,7 +307,7 @@ func run(args []string) error {
 				discoveryResolver = append(discovery.Resolver{discoverDNS}, discoveryResolver...)
 			}
 			p.Proxy.DiscoveryResolver = discoveryResolver
-			r = discovery.Resolver{discoverHosts, discoverMerlin, discoverMDNS, discoverDHCP, discoverDNS}
+			r = discovery.Resolver{discoverHosts, discoverMerlin, discoverDHCP, discoverDNS, discoverMDNS}
 			ctl.Command("discovered", func(data interface{}) interface{} {
 				d := map[string]map[string][]string{}
 				r.Visit(func(source, name string, addrs []string) {
@@ -515,18 +515,29 @@ func setupClientReporting(p *proxySvc, conf *config.Configs, r discovery.Resolve
 			ci.IP = q.PeerIP.String()
 			ci.Name = normalizeName(r.LookupAddr(q.PeerIP.String()))
 			if q.MAC != nil {
-				ci.ID = shortID(conf.Get(q.PeerIP, q.MAC), q.MAC)
 				hex := q.MAC.String()
-				if len(hex) >= 8 {
-					// Only send the manufacturer part of the MAC.
-					ci.Model = "mac:" + hex[:8]
+				if !isLocalMAC(q.MAC) {
+					// When a local MAC is used, it's likely a private MAC
+					// feature enabled. This MAC will change regularely,
+					// polluting the logs with host duplicates. It's better not
+					// to use MAC for such hosts, and rely on the discovered
+					// name instead (see below).
+					ci.ID = shortID(conf.Get(q.PeerIP, q.MAC), q.MAC)
+					if len(hex) >= 8 {
+						// Only send the manufacturer part of the MAC.
+						ci.Model = "mac:" + hex[:8]
+					}
 				}
 				if names := r.LookupMAC(hex); len(names) > 0 {
 					ci.Name = normalizeName(names)
 				}
 			}
 			if ci.ID == "" {
-				ci.ID = shortID(conf.Get(q.PeerIP, q.MAC), q.PeerIP)
+				if ci.Name != "" {
+					ci.ID = shortID(conf.Get(q.PeerIP, q.MAC), []byte(ci.Name))
+				} else {
+					ci.ID = shortID(conf.Get(q.PeerIP, q.MAC), q.PeerIP)
+				}
 			}
 			return
 		}
@@ -535,6 +546,11 @@ func setupClientReporting(p *proxySvc, conf *config.Configs, r discovery.Resolve
 		ci.Name = deviceName
 		return
 	}
+}
+
+// isLocalMAC returns true if the MAC address is local only MAC address.
+func isLocalMAC(mac net.HardwareAddr) bool {
+	return len(mac) > 0 && mac[0]&0x2 != 0
 }
 
 func normalizeName(names []string) string {
